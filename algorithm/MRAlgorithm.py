@@ -36,10 +36,10 @@ def create_uniform_rdd_rowindexed_matrix(sc, nrow, ncol, normalize=False):
     used in compute_H
 '''
 def update_h(hxy_tuple):
-    hx, y = hxy_tuple
-    h, x = hx
-    d = h @ y # a scalar(D_ii)
-    e = h @ x.reshape(len(x[0]))
+    hy, x = hxy_tuple
+    h, y = hy
+    d = h @ y
+    e = h @ x
     h_new = h * np.divide(x+d, y+e) # broadcase add
     return h_new
 
@@ -96,10 +96,14 @@ class MRAlgorithm:
         self.k = k
         self.ld = ld
         #self.n = 2649429
-        self.n = 480189
-        self.m = 17770
+        #self.n = 480189
+        #self.n = 150699 #20w
+        self.n = 43136 #5w
+        #self.m = 31 #20w
+        self.m = 26 #5w
+        #self.m = 17770
         self.sc = SparkContext.getOrCreate(SparkConf().setMaster("local[*]").set("spark.driver.memory", "15g"))
-        self.input = self.sc.textFile(datapath).map(lambda x: (int(x.split(',')[0])-1,
+        self.input = self.sc.textFile(datapath).map(lambda x: (int(x.split(',')[0]),
                                                                int(x.split(',')[1]),int(x.split(',')[2])))
         self.A = self.input
         self.H = create_uniform_rdd_rowindexed_matrix(self.sc, self.n, self.k, normalize=True)
@@ -110,8 +114,8 @@ class MRAlgorithm:
     
         ## compute X
         # M1
-        W_b = self.sc.broadcast(self.W.collect()) # a dictionary where the key is the index i
-        Aw = self.A.map(lambda x: (x[1], x[2]*W_b.value[x[0]][1])) #Wi.T
+        W_b = self.sc.broadcast(self.W.collectAsMap()) # a dictionary where the key is the index i
+        Aw = self.A.map(lambda x: (x[1], x[2]*W_b.value[x[0]])) #Wi.T
         #print(Aw.collect())
         # R1 
         self.X = Aw.reduceByKey(lambda x, y: x+y) # add a combiner? #.map(lambda x: (x[0], x[1]))
@@ -119,7 +123,7 @@ class MRAlgorithm:
         
         ## compute B
         # M2
-        ww = self.W.map(lambda x: (None, np.outer(x[1],x[1]))) # w.T.dot(w)? #import numpy.linalg
+        ww = self.W.map(lambda x: (0, np.outer(x[1],x[1]))) # w.T.dot(w)? #import numpy.linalg
         # from pyspark.mllib.linalg.distributed import *
         # as_block_matrix(w.T).multiply(as_block_matrix(w))
         # https://stackoverflow.com/questions/37766213/spark-matrix-multiplication-with-python
@@ -129,15 +133,16 @@ class MRAlgorithm:
         ## compute Y
         # M3
         B_b = self.sc.broadcast(B.collect())
-        y = self.H.map(lambda x: (x[0], B_b.value@x[1]))
+        self.y = self.H.map(lambda x: (x[0], x[1]@B_b.value)).map(lambda x: (x[0], x[1][0]))
+        #print(len(X.collect()))
         
         ## update H
         # M4
-        self.hxj = self.H.join(y).join(self.X)
+        self.hxj = self.H.join(self.y).join(self.X)
         # R4
         # why is it a reduce phase instead of a map phase?
-        #hnew = self.hxj.map(lambda x: (x[0], update_h(x[1])))
-        #self.H = hnew
+        hnew = self.hxj.map(lambda x: (x[0], update_h(x[1])))
+        self.H = hnew
         
     def compute_W(self):
         print("Compute W")
@@ -167,9 +172,9 @@ class MRAlgorithm:
         #M9: update W with broadcast join of S and T. W = W * S/T
         T_b = self.sc.broadcast(self.T.collectAsMap())
         S_b = self.sc.broadcast(self.S.collectAsMap())
-        self.W = self.W.map(lambda x: (x[0], x[1]*np.divide(S_b.value[x[0]], T_b.value[x[0]])))
+        self.W = self.W.map(lambda x: (x[0], x[1]*np.divide(S_b.value[x[0]], T_b.value[x[0]]))).map(lambda x: (x[0], x[1][0]))
         
-    def iterate_HW(self, max_iter=1): # , iteration_time=25, epsilon
+    def iterate_HW(self, max_iter=2): # , iteration_time=25, epsilon
         i = 0
         while i < max_iter: # or np.norm(previous_H, H) < epsilon
             print("Computing H and W for iteration " + str(i))
@@ -259,17 +264,15 @@ class MRAlgorithm:
         
 
 def main():
-    data_files = '../data/input_data/train_data_*.txt'
-    Algorithm = MRAlgorithm(data_files, '../data/output_data-k5', k=5, ld=0.5)
-    #Algorithm.iterate_HW()
-    #Algorithm.H.saveAsTextFile('../data/output_data-H')
+    data_files = '../data/train_small_dataset_5.txt'
+    #data_files = '../data/input_data/train_data_*.txt'
+    Algorithm = MRAlgorithm(data_files, '../data/output_sm_5', k=10, ld=0.5)
+    Algorithm.iterate_HW()
     Algorithm.assign_clusters()
     Algorithm.RM2_distribution()
-    #print('generating full clusters')
-    #Algorithm.fullClusters.collect()
     #print('generating out')
-    #Algorithm.out.collect()
-    #Algorithm.out.saveAsTextFile('../data/output_data-k5')
+    #print(Algorithm.out.take(5))
+    #Algorithm.out.saveAsTextFile('../data/output_data-test')
     Algorithm.save_output()
 
 
