@@ -98,11 +98,13 @@ class MRAlgorithm:
         #self.n = 2649429
         #self.n = 480189
         #self.n = 150699 #20w
-        self.n = 43136 #5w
+        self.n = 43136 #5w # n and m value for the small dataset
         #self.m = 31 #20w
         self.m = 26 #5w
-        #self.m = 17770
+        #self.m = 17770 # whole dataset 
         self.sc = SparkContext.getOrCreate(SparkConf().setMaster("local[*]").set("spark.driver.memory", "15g"))
+        #more optimal spark configuration setting:
+        #self.sc = SparkContext.getOrCreate(SparkConf().setMaster("local[*]").set("spark.driver.memory", "15g")).set("spark.default.parallelism", "100"))
         self.input = self.sc.textFile(datapath).map(lambda x: (int(x.split(',')[0]),
                                                                int(x.split(',')[1]),int(x.split(',')[2])))
         self.A = self.input
@@ -115,18 +117,14 @@ class MRAlgorithm:
         ## compute X
         # M1
         W_b = self.sc.broadcast(self.W.collectAsMap()) # a dictionary where the key is the index i
-        Aw = self.A.map(lambda x: (x[1], x[2]*W_b.value[x[0]])) #Wi.T
-        #print(Aw.collect())
+        Aw = self.A.map(lambda x: (x[1], x[2]*W_b.value[x[0]]))
         # R1 
-        self.X = Aw.reduceByKey(lambda x, y: x+y) # add a combiner? #.map(lambda x: (x[0], x[1]))
+        self.X = Aw.reduceByKey(lambda x, y: x+y)
     
         
         ## compute B
         # M2
-        ww = self.W.map(lambda x: (0, np.outer(x[1],x[1]))) # w.T.dot(w)? #import numpy.linalg
-        # from pyspark.mllib.linalg.distributed import *
-        # as_block_matrix(w.T).multiply(as_block_matrix(w))
-        # https://stackoverflow.com/questions/37766213/spark-matrix-multiplication-with-python
+        ww = self.W.map(lambda x: (0, np.outer(x[1],x[1])))
         # R2
         B = ww.reduceByKey(lambda x, y: x+y).map(lambda x: x[1]) # without map?
         
@@ -134,13 +132,11 @@ class MRAlgorithm:
         # M3
         B_b = self.sc.broadcast(B.collect())
         self.y = self.H.map(lambda x: (x[0], x[1]@B_b.value)).map(lambda x: (x[0], x[1][0]))
-        #print(len(X.collect()))
         
         ## update H
         # M4
         self.hxj = self.H.join(self.y).join(self.X)
         # R4
-        # why is it a reduce phase instead of a map phase?
         hnew = self.hxj.map(lambda x: (x[0], update_h(x[1])))
         self.H = hnew
         
@@ -258,6 +254,17 @@ class MRAlgorithm:
         self.out.saveAsTextFile(self.output_path)
         print("Saved to " + self.output_path)
         self.sc.stop()
+        
+      
+    '''
+    The function used to run only PPC iteration phase and save H, W 
+    '''
+#     def save_HW(self):
+#         print('saving H and W after iteration')
+#         self.H.saveAsTextFile("gs://dataproc-staging-europe-west1-10576649090-obr3kvwn/out_H_5")
+#         self.W.saveAsTextFile("gs://dataproc-staging-europe-west1-10576649090-obr3kvwn/out_W_5")
+#         #print("stop the cluster after the iteration without saving")
+#         self.sc.stop()
             
         
         
@@ -268,11 +275,10 @@ def main():
     #data_files = '../data/input_data/train_data_*.txt'
     Algorithm = MRAlgorithm(data_files, '../data/output_sm_5', k=10, ld=0.5)
     Algorithm.iterate_HW()
+    #Algorithm.save_HW() # when running PPC and RM2 phases seperately, uncomment this
     Algorithm.assign_clusters()
     Algorithm.RM2_distribution()
-    #print('generating out')
-    #print(Algorithm.out.take(5))
-    #Algorithm.out.saveAsTextFile('../data/output_data-test')
+    print('generating out')
     Algorithm.save_output()
 
 
